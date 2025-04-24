@@ -1,0 +1,328 @@
+clc; clear; close all; warning off;
+%选项
+selectedMethod = 'butterworth'; 
+
+%% 文件路径配置
+imageNames = {'barbara', 'lena', 'peppers256'};
+noiseTypes = {'speckle', 'gaussian', 'salt-pepper'};
+noiseFolders = {'乘性噪声', '高斯噪声', '椒盐噪声'};
+originalFolder = '原始图像';
+
+%% 方法参数配置
+methodConfig = struct(...
+    'butterworth', struct('d0',[30,30,40,40], 'n',[2,5,2,5]), ...
+    'gaussian',    struct('d0',[30,40,50,60]), ...
+    'average',     struct('size',[3,5,7,9]), ...
+    'bilateral',   struct('size',[3,5,7,9], 'sigmaC',30, 'sigmaS',30), ...
+    'wavelet',     struct('level',[4,3,2,1]), ...
+    'median',      struct('size',[3,5,7,9]), ...
+    'wiener',      struct('size',[3,5,7,9]), ...
+    'morphological', struct('operation',{{'open','close','openclose','closeopen'}}, 'se_size',[1,1,1,1]), ...
+    'adpmedian',     struct('max_size',[1,3,5,7]), ...
+    'NLM',          struct('h',[0.05,0.1,0.2,0.4], 'search',[5,7,9,11]) ...
+);
+
+%% 数据预处理
+data = loadImageData(imageNames, noiseTypes, noiseFolders, originalFolder);
+
+%% 核心处理
+if isfield(methodConfig, selectedMethod)
+    processSingleMethod(data, methodConfig.(selectedMethod), selectedMethod, imageNames, noiseTypes);
+else
+    error('未知方法: %s', selectedMethod);
+end
+
+%% 数据加载函数
+function data = loadImageData(imageNames, noiseTypes, noiseFolders, originalFolder)
+    data = struct();
+    for imgIdx = 1:length(imageNames)
+        imgName = imageNames{imgIdx};
+        data(imgIdx).name = imgName;
+        data(imgIdx).original = imread(fullfile(originalFolder, [imgName '.png']));
+        for noiseIdx = 1:length(noiseTypes)
+            noiseFile = fullfile(noiseFolders{noiseIdx}, sprintf('%s_%s.png',imgName,noiseTypes{noiseIdx}));
+            data(imgIdx).noisy{noiseIdx} = imread(noiseFile);
+        end
+    end
+end
+
+%% 核心处理函数
+function processSingleMethod(data, params, methodName, imgNames, noiseTypes)
+    fig = figure('Name',[methodName ' 去噪效果对比'], 'Units','normalized', 'Position',[0.05 0.05 0.9 0.8]);
+    
+    %% 布局参数
+    imageRows = 6;  imageCols = 9;
+    topMargin = 0.06; bottomMargin = 0.06; 
+    leftMargin = 0.04; rightMargin = 0.04;
+    hSpacing = 0.004; vSpacing = 0.004;
+    
+    imageWidth = (1 - leftMargin - rightMargin - (imageCols-1)*hSpacing)/imageCols;
+    imageHeight = (1 - topMargin - bottomMargin - (imageRows-1)*vSpacing)/imageRows;
+
+    %% 噪声图像行
+    for col = 1:imageCols
+        [imgIdx, noiseIdx] = getColInfo(col);
+        xPos = leftMargin + (col-1)*(imageWidth + hSpacing);
+        yPos = 1 - topMargin - imageHeight;
+        createSubplot(fig, [xPos yPos imageWidth imageHeight]);
+        imshow(data(imgIdx).noisy{noiseIdx});
+        addLeftLabel(col == 1, '噪声图像', 12);
+    end
+
+    %% 去噪结果行
+    psnrMatrix = zeros(5, imageCols); 
+    
+    % 计算噪声图像PSNR
+    for col = 1:imageCols
+        [imgIdx, noiseIdx] = getColInfo(col);
+        psnrMatrix(1, col) = psnrFunc(data(imgIdx).noisy{noiseIdx}, data(imgIdx).original);
+    end
+
+    % 处理各参数配置
+    for paramIdx = 1:4
+        for col = 1:imageCols
+            [imgIdx, noiseIdx] = getColInfo(col);
+            xPos = leftMargin + (col-1)*(imageWidth + hSpacing);
+            yPos = 1 - topMargin - (paramIdx+1)*(imageHeight + vSpacing);
+            createSubplot(fig, [xPos yPos imageWidth imageHeight]);
+            
+            % 应用去噪算法
+            denoised = applyDenoise(methodName, data(imgIdx).noisy{noiseIdx}, params, paramIdx);
+            imshow(denoised);
+            
+            % 存储PSNR到第二至第五行
+            psnrMatrix(paramIdx+1, col) = psnrFunc(denoised, data(imgIdx).original);
+            
+            % 添加左侧参数标签
+            if col == 1
+                paramStr = getParamLabel(methodName, params, paramIdx);
+                addLeftLabel(true, paramStr, 10);
+            end
+        end
+    end
+
+    %% 原始图像行
+    for col = 1:imageCols
+        [imgIdx, ~] = getColInfo(col);
+        xPos = leftMargin + (col-1)*(imageWidth + hSpacing);
+        yPos = 1 - topMargin - 6*(imageHeight + vSpacing);
+        createSubplot(fig, [xPos yPos imageWidth imageHeight]);
+        imshow(data(imgIdx).original);
+        addLeftLabel(col == 1, '原始图像', 12);
+    end
+
+    %% 生成行标签
+    rowNames = cell(5,1);
+    rowNames{1} = '噪声图像';
+    for i = 1:4
+        rowNames{i+1} = getParamLabel(methodName, params, i);
+    end
+    
+    %% 创建PSNR表格
+    %createPSNRTable(psnrMatrix, imgNames, noiseTypes, methodName, rowNames);
+end
+
+%% PSNR表格生成函数
+function createPSNRTable(psnrMatrix, imgNames, noiseTypes, methodName, rowNames)
+    figTable = figure('Name',[methodName ' PSNR数值表'], 'Units','normalized',...
+                     'Position',[0.1 0.1 0.8 0.6], 'NumberTitle','off');
+    
+    %% 生成列名
+    columnNames = cell(1, 9);
+    for col = 1:9
+        [imgIdx, noiseIdx] = getColInfo(col);
+        columnNames{col} = sprintf('%s|%s', imgNames{imgIdx}, noiseTypes{noiseIdx});
+    end
+    
+    %% 创建表格
+    uit = uitable(figTable,...
+        'Data', round(psnrMatrix,1),...
+        'ColumnName', columnNames,...
+        'RowName', rowNames,...
+        'Units', 'normalized',...
+        'Position', [0.05 0.05 0.9 0.9],...
+        'FontSize', 12,...
+        'ColumnWidth', repmat({'auto'},1,9));
+    
+    %% 添加标题
+    uicontrol(figTable,...
+        'Style', 'text',...
+        'String', sprintf('%s 方法PSNR数值表', methodName),...
+        'Units', 'normalized',...
+        'Position', [0.1 0.93 0.8 0.05],...
+        'FontSize', 14,...
+        'FontWeight', 'bold');
+end
+
+%% 辅助函数
+function createSubplot(fig, position)
+    axes('Parent',fig, 'Position', position);
+    axis off;
+end
+
+function addLeftLabel(condition, textStr, fontSize)
+    if condition
+        text(-100, 100, textStr, 'Rotation',90, 'FontSize',fontSize,...
+            'VerticalAlignment','middle', 'HorizontalAlignment','center');
+    end
+end
+
+function [imgIdx, noiseIdx] = getColInfo(col)
+    imgIdx = ceil(col/3);
+    noiseIdx = mod(col-1,3) +1;
+end
+
+function psnrVal = psnrFunc(denoised, original)
+    denoised = im2uint8(denoised);
+    original = im2uint8(original);
+    mse = mean((double(denoised(:)) - double(original(:))).^2);
+    psnrVal = 10*log10(255^2/mse);
+end
+
+function label = getParamLabel(method, params, idx)
+    switch method
+        case 'butterworth'
+            label = sprintf('d0=%d\nn=%d', params.d0(idx), params.n(idx));
+        case 'gaussian'
+            label = sprintf('d0=%d', params.d0(idx));
+        case {'average', 'median', 'wiener'}
+            label = sprintf('%dx%d', params.size(idx), params.size(idx));
+        case 'bilateral'
+            label = sprintf('邻域%dpx', params.size(idx));
+        case 'wavelet'
+            label = sprintf('%d层分解', params.level(idx));
+        case 'morphological'
+            label = sprintf('%s\nse=%d', params.operation{idx}, params.se_size(idx));
+        case 'adpmedian'
+            label = sprintf('max:%d', params.max_size(idx));
+        case 'NLM'
+            label = sprintf('h=%.2f\nS=%d', params.h(idx), params.search(idx));
+    end
+end
+
+%% 去噪算法实现
+function output = applyDenoise(method, img, params, idx)
+    switch method
+        case 'butterworth'
+            output = butterworthFilter(img, params.d0(idx), params.n(idx));
+        case 'gaussian'
+            output = gaussianFilter(img, params.d0(idx));
+        case 'average'
+            output = imfilter(img, fspecial('average',params.size(idx)), 'symmetric');
+        case 'bilateral'
+            output = bilateralFilter(img, params.size(idx), params.sigmaC, params.sigmaS);
+        case 'wavelet'
+            output = waveletDenoise(img, params.level(idx));
+        case 'median'
+            output = medfilt2(img, [params.size(idx), params.size(idx)]);
+        case 'wiener'
+            output = wiener2(img, [params.size(idx), params.size(idx)]);
+        case 'morphological'
+            output = morphologicalFilter(img, params.operation{idx}, params.se_size(idx));
+        case 'adpmedian'
+            output = adpmedianFilter(img, params.max_size(idx));
+        case 'NLM'
+            output = NLMFilter(img, params.h(idx), params.search(idx));
+    end
+end
+
+function output = morphologicalFilter(img, operation, seSize)
+    se = strel('disk',seSize); 
+    switch operation
+        case 'open', filtered = imopen(img, se);
+        case 'close', filtered = imclose(img, se);
+        case 'openclose', filtered = imclose(imopen(img,se),se);
+        case 'closeopen', filtered = imopen(imclose(img,se),se);
+    end
+    output = im2uint8(filtered);
+end
+
+function denoised = adpmedianFilter(img, Smax)
+    img = im2double(img);
+    [M, N] = size(img);
+    denoised = zeros(M,N);
+    for i = 1:M
+        for j = 1:N
+            Sxy = 3;
+            while true
+                Sxy = Sxy + 2;
+                if Sxy > Smax, denoised(i,j) = img(i,j); break; end
+                rlow = max(1,i-(Sxy-1)/2); rhigh = min(M,i+(Sxy-1)/2);
+                clow = max(1,j-(Sxy-1)/2); chigh = min(N,j+(Sxy-1)/2);
+                region = img(rlow:rhigh, clow:chigh);
+                Zmin = min(region(:)); Zmax = max(region(:));
+                Zmed = median(region(:)); Zxy = img(i,j);
+                if Zmed > Zmin && Zmed < Zmax
+                    if Zxy > Zmin && Zxy < Zmax
+                        denoised(i,j) = Zxy;
+                    else
+                        denoised(i,j) = Zmed;
+                    end
+                    break
+                end
+            end
+        end
+    end
+    denoised = im2uint8(denoised);
+end
+
+function output = NLMFilter(img, h, searchWin)
+    if numel(size(img))>2, img = rgb2gray(img); end
+    output = imnlmfilt(img,'DegreeOfSmoothing', h*255,'SearchWindowSize', searchWin,'ComparisonWindowSize',5);
+end
+
+function output = butterworthFilter(img, d0, n)
+    s = fftshift(fft2(im2double(img)));
+    [N1, N2] = size(s);
+    n1 = round(N1/2); n2 = round(N2/2);
+    for i = 1:N1
+        for j = 1:N2
+            distance = sqrt((i-n1)^2 + (j-n2)^2);
+            h = 1 / (1 + (distance/d0)^(2*n));
+            s(i,j) = h * s(i,j);
+        end
+    end
+    output = im2uint8(real(ifft2(ifftshift(s))));
+end
+
+function output = gaussianFilter(image, d0)
+    s = fftshift(fft2(im2double(image)));
+    [a, b] = size(s);
+    a0 = round(a/2); b0 = round(b/2);
+    for i = 1:a
+        for j = 1:b
+            h = exp(-((i-a0)^2 + (j-b0)^2) / (2*d0^2));
+            s(i,j) = h * s(i,j);
+        end
+    end
+    output = im2uint8(real(ifft2(ifftshift(s))));
+end
+
+function filtered = bilateralFilter(image, domSize, sigmaC, sigmaS)
+    image = im2double(image);
+    [rows, cols] = size(image);
+    filtered = zeros(rows, cols);
+    pad = floor(domSize/2);
+    kernel = fspecial('gaussian', domSize, sigmaS);
+    for i = 1:rows
+        for j = 1:cols
+            iMin = max(1, i-pad); iMax = min(rows, i+pad);
+            jMin = max(1, j-pad); jMax = min(cols, j+pad);
+            region = image(iMin:iMax, jMin:jMax);
+            colorDiff = (image(i,j) - region).^2;
+            colorWeights = exp(-colorDiff / (2*sigmaC^2));
+            spatial = kernel(1:(iMax-iMin+1), 1:(jMax-jMin+1));
+            weights = colorWeights .* spatial;
+            weights = weights / sum(weights(:));
+            filtered(i,j) = sum(region(:) .* weights(:));
+        end
+    end
+    filtered = im2uint8(filtered);
+end
+
+function output = waveletDenoise(img, level)
+    [c,s] = wavedec2(img, level, 'db4');
+    thr = wthrmngr('dw2ddenoLVL','penalhi',c,s,3);
+    c = wdencmp('lvd',c,s,'db4',level,thr,'h');
+    output = im2uint8(mat2gray(c));
+end
