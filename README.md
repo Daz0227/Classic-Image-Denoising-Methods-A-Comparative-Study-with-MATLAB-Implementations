@@ -1,8 +1,5 @@
 # Classic-Image-Denoising-Methods-A-Comparative-Study-with-MATLAB-Implementations
 
-```markdown
-
-
 图像去噪算法对比研究框架，提供10种经典去噪方法的完整MATLAB实现与系统化评估工具。
 
 
